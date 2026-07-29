@@ -13,10 +13,10 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "NONA — The Daily Word Ladder",
+  title: "Nonle — Endless Word Ladder",
   description:
-    "Turn a fresh four-letter word into NONA, one valid letter change at a time.",
-  applicationName: "NONA",
+    "Turn endless four-letter words into NONA, one valid letter change at a time.",
+  applicationName: "Nonle",
   other: {
     "codex-preview": "development",
   },
@@ -27,8 +27,8 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#fffaf6",
-  colorScheme: "light",
+  themeColor: "#1d1d1d",
+  colorScheme: "dark",
   width: "device-width",
   initialScale: 1,
 };
