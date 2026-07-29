@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Nonle — Endless Word Ladder",
+  title: "Nonle — Daily & Endless Word Ladder",
   description:
-    "Turn endless four-letter words into NONA, one valid letter change at a time.",
+    "Play one shared Daily word ladder or unlimited Endless rounds and turn each word into NONA.",
   applicationName: "Nonle",
   other: {
     "codex-preview": "development",

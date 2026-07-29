@@ -1,6 +1,6 @@
 # Nonle Word
 
-A minimalist endless word-ladder game: turn each generated four-letter word
+A minimalist daily and endless word-ladder game: turn each four-letter word
 into **NONA** by changing one letter at a time. Every step must be a valid
 English word.
 
@@ -12,12 +12,13 @@ The current production build is available at:
 
 ## Features
 
-- Unlimited endless rounds
+- One shared Daily puzzle for everyone
+- Unlimited Endless rounds
 - 5,500+ bundled four-letter English words
 - Shortest-path calculation and par score
 - Context-aware hints, undo, and restart
-- Win statistics, averages, and best score
-- Saved game progress and preferences
+- Win statistics, averages, best score, and Daily streaks
+- Separate saved progress for Daily and Endless
 - Shareable results
 - Optional sound effects
 - Responsive keyboard and touch controls

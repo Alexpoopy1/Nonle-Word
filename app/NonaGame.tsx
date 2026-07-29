@@ -3,10 +3,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 const TARGET = "nona";
-const STATS_KEY = "nonle-endless-stats-v2";
+const STATS_KEY = "nonle-stats-v3";
+const ENDLESS_STATS_KEY = "nonle-endless-stats-v2";
 const LEGACY_STATS_KEY = "nona-player-stats-v1";
-const PROGRESS_KEY = "nonle-endless-progress-v2";
+const DAILY_PROGRESS_KEY = "nonle-daily-progress-v3";
+const ENDLESS_PROGRESS_KEY = "nonle-endless-progress-v2";
+const LEGACY_PROGRESS_KEY = "nona-active-progress-v1";
+const MODE_KEY = "nonle-mode-v3";
 const SOUND_KEY = "nona-sound-v1";
+
+type Mode = "daily" | "endless";
 
 type GraphData = {
   dictionary: Set<string>;
@@ -19,9 +25,14 @@ type PlayerStats = {
   wins: number;
   bestSteps: number | null;
   totalSteps: number;
+  currentStreak: number;
+  maxStreak: number;
+  lastDailyWin: string | null;
+  dailyWins: Record<string, number>;
 };
 
 type SavedProgress = {
+  date?: string;
   startWord: string;
   guesses: string[];
   hintsUsed: number;
@@ -34,6 +45,10 @@ const DEFAULT_STATS: PlayerStats = {
   wins: 0,
   bestSteps: null,
   totalSteps: 0,
+  currentStreak: 0,
+  maxStreak: 0,
+  lastDailyWin: null,
+  dailyWins: {},
 };
 
 const START_WORDS = [
@@ -220,6 +235,22 @@ function hashText(value: string) {
   return hash >>> 0;
 }
 
+function todayKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function dailyNumber() {
+  const firstDay = Date.UTC(2026, 0, 1);
+  const today = Date.parse(`${todayKey()}T00:00:00Z`);
+  return Math.floor((today - firstDay) / 86_400_000) + 1;
+}
+
+function dayDifference(older: string, newer: string) {
+  const olderTime = Date.parse(`${older}T00:00:00Z`);
+  const newerTime = Date.parse(`${newer}T00:00:00Z`);
+  return Math.round((newerTime - olderTime) / 86_400_000);
+}
+
 function differsByOne(left: string, right: string) {
   let differences = 0;
   for (let index = 0; index < 4; index += 1) {
@@ -279,7 +310,62 @@ function parseStats(value: string | null): PlayerStats | null {
         typeof parsed.totalSteps === "number" && parsed.totalSteps >= 0
           ? parsed.totalSteps
           : 0,
+      currentStreak:
+        typeof parsed.currentStreak === "number" && parsed.currentStreak >= 0
+          ? parsed.currentStreak
+          : 0,
+      maxStreak:
+        typeof parsed.maxStreak === "number" && parsed.maxStreak >= 0
+          ? parsed.maxStreak
+          : 0,
+      lastDailyWin:
+        typeof parsed.lastDailyWin === "string" ? parsed.lastDailyWin : null,
+      dailyWins:
+        parsed.dailyWins && typeof parsed.dailyWins === "object"
+          ? parsed.dailyWins
+          : {},
     };
+  } catch {
+    return null;
+  }
+}
+
+function parseProgress(value: string | null, graph: GraphData) {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<SavedProgress>;
+    const savedGuesses = Array.isArray(parsed.guesses)
+      ? parsed.guesses.filter(
+          (word): word is string =>
+            typeof word === "string" && graph.dictionary.has(word),
+        )
+      : [];
+    const validChain =
+      savedGuesses.length > 0 &&
+      savedGuesses.every(
+        (word, index) =>
+          index === 0 || differsByOne(savedGuesses[index - 1], word),
+      );
+
+    if (
+      typeof parsed.startWord !== "string" ||
+      parsed.startWord !== savedGuesses[0] ||
+      !validChain
+    ) {
+      return null;
+    }
+
+    return {
+      date: typeof parsed.date === "string" ? parsed.date : undefined,
+      startWord: parsed.startWord,
+      guesses: savedGuesses,
+      hintsUsed:
+        typeof parsed.hintsUsed === "number" && parsed.hintsUsed >= 0
+          ? parsed.hintsUsed
+          : 0,
+      won: parsed.won === true && savedGuesses.at(-1) === TARGET,
+      roundStarted: parsed.roundStarted === true,
+    } satisfies SavedProgress;
   } catch {
     return null;
   }
@@ -295,16 +381,18 @@ function BackspaceIcon() {
 
 export default function NonaGame({ dictionary }: { dictionary: string[] }) {
   const graph = useMemo(() => buildGraph(dictionary), [dictionary]);
-  const initialStart = useMemo(
-    () => pickStart(graph, "nonle-initial"),
-    [graph],
+  const dailyDate = todayKey();
+  const dailyStart = useMemo(
+    () => pickStart(graph, `nonle-daily-${dailyDate}`),
+    [dailyDate, graph],
   );
   const boardRef = useRef<HTMLDivElement>(null);
   const roundRef = useRef(0);
   const restoredRef = useRef(false);
 
-  const [startWord, setStartWord] = useState(initialStart);
-  const [guesses, setGuesses] = useState<string[]>([initialStart]);
+  const [mode, setMode] = useState<Mode>("daily");
+  const [startWord, setStartWord] = useState(dailyStart);
+  const [guesses, setGuesses] = useState<string[]>([dailyStart]);
   const [input, setInput] = useState("");
   const [notice, setNotice] = useState("Change one letter at a time.");
   const [noticeType, setNoticeType] = useState<
@@ -339,68 +427,96 @@ export default function NonaGame({ dictionary }: { dictionary: string[] }) {
       restoredRef.current = true;
 
       try {
-        const savedStats =
-          parseStats(window.localStorage.getItem(STATS_KEY)) ??
-          parseStats(window.localStorage.getItem(LEGACY_STATS_KEY));
-        if (savedStats) setStats(savedStats);
+        const savedStats = parseStats(window.localStorage.getItem(STATS_KEY));
+        const endlessStats = parseStats(
+          window.localStorage.getItem(ENDLESS_STATS_KEY),
+        );
+        const legacyStats = parseStats(
+          window.localStorage.getItem(LEGACY_STATS_KEY),
+        );
+
+        const migratedStats = endlessStats
+          ? {
+              ...endlessStats,
+              currentStreak: legacyStats?.currentStreak ?? 0,
+              maxStreak: legacyStats?.maxStreak ?? 0,
+              lastDailyWin: legacyStats?.lastDailyWin ?? null,
+              dailyWins: legacyStats?.dailyWins ?? {},
+            }
+          : legacyStats;
+        const nextStats = savedStats ?? migratedStats;
+        if (nextStats) setStats(nextStats);
 
         setSoundOn(window.localStorage.getItem(SOUND_KEY) !== "off");
 
-        const savedProgress = window.localStorage.getItem(PROGRESS_KEY);
-        if (savedProgress) {
-          const parsed = JSON.parse(savedProgress) as Partial<SavedProgress>;
-          const savedGuesses = Array.isArray(parsed.guesses)
-            ? parsed.guesses.filter(
-                (word): word is string =>
-                  typeof word === "string" && graph.dictionary.has(word),
+        const nextMode: Mode =
+          window.localStorage.getItem(MODE_KEY) === "endless"
+            ? "endless"
+            : "daily";
+        const primaryProgress = parseProgress(
+          window.localStorage.getItem(
+            nextMode === "daily"
+              ? DAILY_PROGRESS_KEY
+              : ENDLESS_PROGRESS_KEY,
+          ),
+          graph,
+        );
+        const legacyDailyProgress =
+          nextMode === "daily"
+            ? parseProgress(
+                window.localStorage.getItem(LEGACY_PROGRESS_KEY),
+                graph,
               )
-            : [];
-          const validChain =
-            savedGuesses.length > 0 &&
-            savedGuesses.every(
-              (word, index) =>
-                index === 0 || differsByOne(savedGuesses[index - 1], word),
-            );
+            : null;
+        const savedProgress = primaryProgress ?? legacyDailyProgress;
+        const canRestore =
+          savedProgress !== null &&
+          (nextMode === "endless" ||
+            (savedProgress.date === dailyDate &&
+              savedProgress.startWord === dailyStart));
 
-          if (
-            typeof parsed.startWord === "string" &&
-            parsed.startWord === savedGuesses[0] &&
-            validChain
-          ) {
-            setStartWord(parsed.startWord);
-            setGuesses(savedGuesses);
-            setHintsUsed(
-              typeof parsed.hintsUsed === "number" ? parsed.hintsUsed : 0,
-            );
-            setWon(parsed.won === true && savedGuesses.at(-1) === TARGET);
-            setRoundStarted(parsed.roundStarted === true);
-            setNotice(
-              parsed.won
+        setMode(nextMode);
+
+        if (canRestore && savedProgress) {
+          setStartWord(savedProgress.startWord);
+          setGuesses(savedProgress.guesses);
+          setHintsUsed(savedProgress.hintsUsed);
+          setWon(savedProgress.won);
+          setRoundStarted(savedProgress.roundStarted);
+          setNotice(
+            nextMode === "daily"
+              ? savedProgress.won
+                ? "Today’s puzzle is solved."
+                : "Today’s puzzle is ready."
+              : savedProgress.won
                 ? "Solved. Start the next word when you are ready."
                 : "Your endless game is ready.",
-            );
-            setHydrated(true);
-            return;
-          }
+          );
+        } else if (nextMode === "daily") {
+          setStartWord(dailyStart);
+          setGuesses([dailyStart]);
+          setNotice("Today’s puzzle. Change one letter at a time.");
+        } else {
+          roundRef.current += 1;
+          const freshStart = pickStart(
+            graph,
+            makeSeed(roundRef.current),
+            dailyStart,
+          );
+          setStartWord(freshStart);
+          setGuesses([freshStart]);
+          setNotice("Change one letter at a time.");
         }
-
-        roundRef.current += 1;
-        const freshStart = pickStart(
-          graph,
-          makeSeed(roundRef.current),
-          initialStart,
-        );
-        setStartWord(freshStart);
-        setGuesses([freshStart]);
       } catch {
-        window.localStorage.removeItem(PROGRESS_KEY);
+        window.localStorage.removeItem(DAILY_PROGRESS_KEY);
+        window.localStorage.removeItem(ENDLESS_PROGRESS_KEY);
       }
 
       setHydrated(true);
     }, 0);
 
     return () => window.clearTimeout(restoreTimer);
-  }, [graph, initialStart]);
+  }, [dailyDate, dailyStart, graph]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -414,18 +530,29 @@ export default function NonaGame({ dictionary }: { dictionary: string[] }) {
 
   useEffect(() => {
     if (!hydrated) return;
+    window.localStorage.setItem(MODE_KEY, mode);
+  }, [hydrated, mode]);
+
+  useEffect(() => {
+    if (!hydrated) return;
     const progress: SavedProgress = {
+      date: mode === "daily" ? dailyDate : undefined,
       startWord,
       guesses,
       hintsUsed,
       won,
       roundStarted,
     };
-    window.localStorage.setItem(PROGRESS_KEY, JSON.stringify(progress));
+    window.localStorage.setItem(
+      mode === "daily" ? DAILY_PROGRESS_KEY : ENDLESS_PROGRESS_KEY,
+      JSON.stringify(progress),
+    );
   }, [
+    dailyDate,
     guesses,
     hintsUsed,
     hydrated,
+    mode,
     roundStarted,
     startWord,
     won,
@@ -493,13 +620,51 @@ export default function NonaGame({ dictionary }: { dictionary: string[] }) {
     oscillator.addEventListener("ended", () => void context.close());
   }
 
-  function newRound() {
+  function applyProgress(progress: SavedProgress, nextMode: Mode) {
+    setStartWord(progress.startWord);
+    setGuesses(progress.guesses);
+    setInput("");
+    setHintsUsed(progress.hintsUsed);
+    setWon(progress.won);
+    setRoundStarted(progress.roundStarted);
+    setShowWin(false);
+    setCopied(false);
+    setNotice(
+      nextMode === "daily"
+        ? progress.won
+          ? "Today’s puzzle is solved."
+          : "Today’s puzzle is ready."
+        : progress.won
+          ? "Solved. Start the next word when you are ready."
+          : "Your endless game is ready.",
+    );
+    setNoticeType(progress.won ? "success" : "neutral");
+  }
+
+  function saveCurrentProgress() {
+    if (!hydrated) return;
+    const progress: SavedProgress = {
+      date: mode === "daily" ? dailyDate : undefined,
+      startWord,
+      guesses,
+      hintsUsed,
+      won,
+      roundStarted,
+    };
+    window.localStorage.setItem(
+      mode === "daily" ? DAILY_PROGRESS_KEY : ENDLESS_PROGRESS_KEY,
+      JSON.stringify(progress),
+    );
+  }
+
+  function freshEndlessRound() {
     roundRef.current += 1;
     const nextStart = pickStart(
       graph,
       makeSeed(roundRef.current),
-      startWord,
+      mode === "endless" ? startWord : dailyStart,
     );
+    setMode("endless");
     setStartWord(nextStart);
     setGuesses([nextStart]);
     setInput("");
@@ -510,7 +675,54 @@ export default function NonaGame({ dictionary }: { dictionary: string[] }) {
     setCopied(false);
     setNotice("Change one letter at a time.");
     setNoticeType("neutral");
+  }
+
+  function selectMode(nextMode: Mode) {
+    if (nextMode === mode) return;
+    saveCurrentProgress();
+
+    const savedProgress = parseProgress(
+      window.localStorage.getItem(
+        nextMode === "daily" ? DAILY_PROGRESS_KEY : ENDLESS_PROGRESS_KEY,
+      ),
+      graph,
+    );
+    const canRestore =
+      savedProgress !== null &&
+      (nextMode === "endless" ||
+        (savedProgress.date === dailyDate &&
+          savedProgress.startWord === dailyStart));
+
+    setMode(nextMode);
+    if (canRestore && savedProgress) {
+      applyProgress(savedProgress, nextMode);
+    } else if (nextMode === "daily") {
+      applyProgress(
+        {
+          date: dailyDate,
+          startWord: dailyStart,
+          guesses: [dailyStart],
+          hintsUsed: 0,
+          won: false,
+          roundStarted: false,
+        },
+        "daily",
+      );
+      setNotice("Today’s puzzle. Change one letter at a time.");
+    } else {
+      freshEndlessRound();
+    }
     playTone("tap");
+  }
+
+  function newRound() {
+    freshEndlessRound();
+    playTone("tap");
+  }
+
+  function continueAfterWin() {
+    if (mode === "daily") saveCurrentProgress();
+    newRound();
   }
 
   function restartRound() {
@@ -560,6 +772,7 @@ export default function NonaGame({ dictionary }: { dictionary: string[] }) {
     if (isFirstMove) setRoundStarted(true);
 
     if (guess === TARGET) {
+      const winDate = todayKey();
       setWon(true);
       setNotice(
         nextMoves <= par
@@ -567,15 +780,41 @@ export default function NonaGame({ dictionary }: { dictionary: string[] }) {
           : "You reached NONA.",
       );
       setNoticeType("success");
-      setStats((current) => ({
-        played: current.played + (isFirstMove ? 1 : 0),
-        wins: current.wins + 1,
-        bestSteps:
-          current.bestSteps === null
-            ? nextMoves
-            : Math.min(current.bestSteps, nextMoves),
-        totalSteps: current.totalSteps + nextMoves,
-      }));
+      setStats((current) => {
+        const firstDailyWin =
+          mode === "daily" && current.dailyWins[winDate] === undefined;
+        const dailyWins =
+          mode === "daily"
+            ? {
+                ...current.dailyWins,
+                [winDate]: Math.min(
+                  current.dailyWins[winDate] ?? nextMoves,
+                  nextMoves,
+                ),
+              }
+            : current.dailyWins;
+        const nextStreak = firstDailyWin
+          ? current.lastDailyWin &&
+            dayDifference(current.lastDailyWin, winDate) === 1
+            ? current.currentStreak + 1
+            : 1
+          : current.currentStreak;
+
+        return {
+          ...current,
+          played: current.played + (isFirstMove ? 1 : 0),
+          wins: current.wins + 1,
+          bestSteps:
+            current.bestSteps === null
+              ? nextMoves
+              : Math.min(current.bestSteps, nextMoves),
+          totalSteps: current.totalSteps + nextMoves,
+          currentStreak: nextStreak,
+          maxStreak: Math.max(current.maxStreak, nextStreak),
+          lastDailyWin: firstDailyWin ? winDate : current.lastDailyWin,
+          dailyWins,
+        };
+      });
       playTone("win");
       window.setTimeout(() => setShowWin(true), 220);
       return;
@@ -665,7 +904,11 @@ export default function NonaGame({ dictionary }: { dictionary: string[] }) {
           .join("");
       })
       .join("\n");
-    const result = `Nonle Endless • ${moves} move${
+    const shareTitle =
+      mode === "daily"
+        ? `Nonle Daily #${dailyNumber()}`
+        : "Nonle Endless";
+    const result = `${shareTitle} • ${moves} move${
       moves === 1 ? "" : "s"
     }${hintsUsed ? ` • ${hintsUsed} hint${hintsUsed === 1 ? "" : "s"}` : ""}\n${rows}\n${startWord.toUpperCase()} → NONA`;
 
@@ -697,14 +940,37 @@ export default function NonaGame({ dictionary }: { dictionary: string[] }) {
         <h1>
           Nonle <span aria-hidden="true">🔥</span>
         </h1>
+        <div className="mode-switch" role="group" aria-label="Game mode">
+          <button
+            type="button"
+            className={mode === "daily" ? "active" : ""}
+            aria-pressed={mode === "daily"}
+            onClick={() => selectMode("daily")}
+          >
+            Daily
+          </button>
+          <button
+            type="button"
+            className={mode === "endless" ? "active" : ""}
+            aria-pressed={mode === "endless"}
+            onClick={() => selectMode("endless")}
+          >
+            Endless
+          </button>
+        </div>
         <p>
-          <span>ENDLESS</span>
+          <span>
+            {mode === "daily" ? `DAILY #${dailyNumber()}` : "ENDLESS"}
+          </span>
           {startWord.toUpperCase()} → NONA · {moves}{" "}
           {moves === 1 ? "move" : "moves"}
         </p>
       </header>
 
-      <section className="play-area" aria-label="Nonle endless word game">
+      <section
+        className="play-area"
+        aria-label={`Nonle ${mode} word game`}
+      >
         <div className="word-board" ref={boardRef} aria-live="polite">
           {guesses.map((word, guessIndex) => {
             const previous = guesses[guessIndex - 1];
@@ -746,8 +1012,13 @@ export default function NonaGame({ dictionary }: { dictionary: string[] }) {
         </p>
 
         <div className="utility-row" aria-label="Game controls">
-          <button type="button" onClick={newRound}>
-            New word
+          <button
+            type="button"
+            onClick={() =>
+              mode === "daily" ? selectMode("endless") : newRound()
+            }
+          >
+            {mode === "daily" ? "Play endless" : "New word"}
           </button>
           <button
             type="button"
@@ -858,7 +1129,8 @@ export default function NonaGame({ dictionary }: { dictionary: string[] }) {
             </div>
             <p className="modal-note">
               The brown tile shows the letter that changed. Finish a word, then
-              press Enter.
+              press Enter. Daily gives everyone the same puzzle; Endless keeps
+              generating new ones.
             </p>
             <button
               type="button"
@@ -911,6 +1183,14 @@ export default function NonaGame({ dictionary }: { dictionary: string[] }) {
                 <strong>{averageSteps}</strong>
                 <span>Average</span>
               </div>
+              <div>
+                <strong>{stats.currentStreak}</strong>
+                <span>Streak</span>
+              </div>
+              <div>
+                <strong>{stats.maxStreak}</strong>
+                <span>Max streak</span>
+              </div>
             </div>
             <button
               type="button"
@@ -953,9 +1233,9 @@ export default function NonaGame({ dictionary }: { dictionary: string[] }) {
               <button
                 type="button"
                 className="modal-button"
-                onClick={newRound}
+                onClick={continueAfterWin}
               >
-                Next word
+                {mode === "daily" ? "Play endless" : "Next word"}
               </button>
             </div>
           </section>
